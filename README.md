@@ -1,129 +1,215 @@
-# RxRoute
+# RxRoute 💊
 
-WhatsApp-native prescription routing and pharmacy locator.
+**Send a photo of your prescription on WhatsApp. The nearest pharmacy that has it gets back to you.**
 
-A patient photographs a handwritten prescription and shares their location over WhatsApp. Gemini 2.5 Flash validates the document and extracts the medications, a PostGIS query finds the 5 nearest pharmacies, and all 5 are messaged at once. The first to reply `YES-<REF>` wins the order.
-
-**Stack:** Node.js / Express · Supabase (PostgreSQL + PostGIS) · Twilio WhatsApp · Google Gemini 2.5 Flash
+![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=nodedotjs&logoColor=white)
+![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-PostGIS-4169E1?logo=postgresql&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-3FCF8E?logo=supabase&logoColor=white)
+![Twilio](https://img.shields.io/badge/Twilio-WhatsApp-F22F46?logo=twilio&logoColor=white)
+![Gemini](https://img.shields.io/badge/Google-Gemini%202.5%20Flash-4285F4?logo=google&logoColor=white)
 
 ---
 
-## Quick start
+## Why I built this
+
+Here's what usually happens in Lagos when a doctor hands you a prescription. You go to the closest pharmacy and they don't have it. You try the next one, then the next. Sometimes you're doing this while you feel awful, or while someone you love is waiting at home.
+
+Pharmacies are close by, and most of them are on WhatsApp. What's missing is a quick way to ask all of them at once.
+
+RxRoute does that asking for you. You send a photo of the prescription and your location. The system reads the handwriting, finds the five closest pharmacies, and messages all of them at the same time. The first pharmacy to reply `YES` gets the order, and you get their name and address.
+
+There's no app to download and no account to create. If you can use WhatsApp, you can use this.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    P(["🧑 Patient<br/>on WhatsApp"]) -- "📍 location + 📷 photo" --> T["Twilio<br/>WhatsApp API"]
+
+    subgraph API ["RxRoute (Node.js / Express)"]
+        direction TB
+        W["Webhook controller<br/>(state machine)"]
+        AI["AI service"]
+        GEO["Geo service"]
+        MSG["Messaging service"]
+        W --> AI --> GEO --> MSG
+    end
+
+    T -- "webhook" --> W
+
+    AI <-- "read the prescription" --> G["Google Gemini<br/>2.5 Flash"]
+    GEO <-- "5 nearest pharmacies" --> DB[("Supabase<br/>PostgreSQL + PostGIS")]
+    MSG -- "broadcast to 5" --> T2["Twilio"]
+    T2 --> PH1(["🏥 Pharmacy 1"]) & PH2(["🏥 Pharmacy 2"]) & PH3(["🏥 Pharmacy ..."])
+    PH1 -. "YES-RX0001" .-> T
+```
+
+In plain words:
+
+1. **The patient sends a location pin and a photo.** The order doesn't matter. If the photo comes first, it's held until the pin arrives.
+2. **Gemini reads the prescription.** It checks whether the image really is a prescription and pulls out each drug and dose as structured JSON. Blurry photos and selfies get a polite rejection.
+3. **PostGIS finds the closest pharmacies.** It searches within 5 km first. If nothing turns up, it widens the radius to 10 km, then 20 km.
+4. **All five pharmacies are messaged at once.** Each gets the drug list and a short code like `RX0001`.
+5. **First reply wins.** The pharmacy that replies `YES-RX0001` first gets the order, and the patient is told where to go.
+
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Patient
+    participant RX as RxRoute
+    participant AI as Gemini
+    participant DB as Postgres / PostGIS
+    actor Pharmacies
+
+    Patient->>RX: 📍 location pin
+    RX->>DB: save patient location
+    Patient->>RX: 📷 prescription photo
+    RX-->>Patient: "Got it, reading your prescription…"
+    RX->>AI: image + extraction schema
+    AI-->>RX: { valid, drugs[], confidence }
+    RX->>DB: create request (RX0001), find 5 nearest
+    RX->>DB: write broadcast ledger
+    RX->>Pharmacies: "Can you fill RX0001? Reply YES-RX0001"
+    Pharmacies->>RX: YES-RX0001 (two reply in the same instant)
+    RX->>DB: claim_prescription_request() with row lock
+    DB-->>RX: exactly one winner
+    RX-->>Patient: "Pharmacy X has your medication 🎉"
+```
+
+---
+
+## The parts I'm proudest of
+
+Most of the work went into the edge cases that turn up once real people start using it.
+
+### 🏁 Two pharmacies reply at the same moment. Only one can win.
+If the check happened in Node (read the status, then update it), two replies arriving together could both be accepted. So the claim is decided inside Postgres with a `SELECT … FOR UPDATE` row lock. The second transaction waits, sees the request is already claimed, and is told who got it. I tested this with 5 connections claiming the same order at once: **1 winner, 4 politely turned away**.
+
+### 🔢 Reference codes a person can type on a phone keypad
+A UUID is useless when a pharmacist has to type it back on a phone. The codes come from a database sequence encoded in Crockford base32, which leaves out letters that look like digits (`I`, `L`, `O`, `U`). You get `RX0001`, `RX0002` and so on. They're unique because of the sequence, not by chance (no collisions across 2,000+ rows).
+
+### ⏱️ Twilio waits 15 seconds. The AI takes longer.
+A media download, a Gemini call and five outgoing messages often take more than Twilio's webhook timeout. The webhook replies to Twilio straight away, keeps working in the background, and sends results through the REST API.
+
+### 🔁 Twilio retries, and nothing runs twice
+Every incoming `MessageSid` is saved before any processing starts. If Twilio sends the same message again, it's recognised and skipped, so the AI doesn't read the photo twice and pharmacies don't get duplicate broadcasts.
+
+### 📒 Write the ledger before sending the first message
+A fast pharmacy can reply while the other four are still being messaged. Because the record of who was contacted is saved *before* the first message goes out, that quick reply can still be checked and accepted.
+
+### 🧾 Failures are kept and explained
+An unreadable photo is stored as `failed` along with the AI's reason, so you can see why it was rejected. One failed send never stops the other four, and every outcome is logged with its Twilio SID or error.
+
+### ☎️ The system won't guess at phone numbers
+`0803 111 2233` has no country code. Guessing one could create a pharmacy that Twilio can never reach, so the API returns a clear `400` and asks for international format.
+
+---
+
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Runtime | **Node.js 18+, Express** | Small, fast and well suited to webhook-heavy I/O |
+| Database | **Supabase (PostgreSQL + PostGIS)** | Real geospatial queries with a GIST index instead of distance maths in JavaScript |
+| AI | **Google Gemini 2.5 Flash** | Strong at reading handwriting, cheap, and supports structured JSON output |
+| Messaging | **Twilio WhatsApp API** | Reaches people on the app they already use every day |
+| Validation | **Zod** | The server won't start with bad config, and requests are checked at the edge |
+
+---
+
+## Project structure
+
+```
+RxRoute/
+├── server.js                 # Boot: verify DB + Twilio, start server, schedule expiry sweep
+├── app.js                    # Express app, logging, error handling
+├── config/                   # Validated env, Supabase + Twilio clients
+├── routes/                   # Webhook, pharmacy, and prescription routes
+├── controllers/
+│   └── whatsappController.js # The WhatsApp conversation state machine
+├── services/
+│   ├── prescriptionService.js# The core pipeline: ingest → verify → match → broadcast → claim
+│   ├── aiService.js          # Gemini vision wrapper with a strict response schema
+│   ├── geoService.js         # PostGIS helpers
+│   ├── mediaService.js       # Safe media downloads (type + size guards)
+│   ├── messagingService.js   # Outbound WhatsApp + message templates
+│   └── sessionService.js     # Location pins and parked photos
+├── middleware/               # API key auth, Twilio signature check, errors
+└── db/
+    ├── schema.sql            # Tables, PostGIS functions, row-level security
+    └── seed.sql              # 10 real Lagos pharmacy locations (safe test numbers)
+```
+
+---
+
+## Running it locally
 
 ```bash
 npm install
-cp .env.example .env          # then fill in your credentials
+cp .env.example .env          # add your Supabase, Twilio and Gemini keys
 
-# Apply the schema + seed data (needs DATABASE_URL in .env),
-# or paste db/schema.sql and db/seed.sql into the Supabase SQL Editor.
-npm run db:push
-npm run db:seed
-npm run db:verify             # proves the backend is talking to a real database
+npm run db:push               # create tables and functions
+npm run db:seed               # load 10 Lagos pharmacies
+npm run db:verify             # confirm the backend can reach a real database
 
 npm run dev
 ```
 
-Expose the webhook and point Twilio at it:
+To connect WhatsApp, expose your local server and point the Twilio Sandbox at it:
 
 ```bash
 ngrok http 3000
 # Twilio Console → Messaging → WhatsApp Sandbox
-#   "When a message comes in" → https://<id>.ngrok-free.app/webhook/whatsapp  (POST)
+# "When a message comes in" → https://<your-id>.ngrok-free.app/webhook/whatsapp (POST)
 ```
 
-Then set `PUBLIC_BASE_URL` to that ngrok URL and `VALIDATE_TWILIO_SIGNATURE=true`.
+Then set `PUBLIC_BASE_URL` to your ngrok URL and `VALIDATE_TWILIO_SIGNATURE=true`.
 
-To receive broadcasts yourself, change one seeded pharmacy's number to your own WhatsApp number (joined to the Sandbox):
+> 💡 To see the pharmacy side yourself, change one seeded pharmacy's number to your own WhatsApp number.
 
-```bash
-curl -X PATCH localhost:3000/api/pharmacies/<id> \
-  -H 'content-type: application/json' \
-  -d '{"name":"My Test Pharmacy"}'
-# or re-run upsert_pharmacy with your number in db/seed.sql
-```
+### Talking to it on WhatsApp
+
+| Who | Sends | What happens |
+|---|---|---|
+| Patient | 📍 location pin + 📷 photo | The prescription is read and broadcast to nearby pharmacies |
+| Pharmacy | `YES-RX0001` | Claims the order |
+| Anyone | `STATUS RX0001` | Shows where a request is up to |
+| Anyone | `HELP` | Explains how to use it |
 
 ---
 
-## Architecture
+## REST API
 
-```
-POST /webhook/whatsapp
-        │
-        ├── register_inbound_message()      idempotency gate (Twilio retries)
-        │
-        ├── location pin?  ──► upsert_patient_location()   ──► resume any parked photo
-        │
-        ├── "YES-RX0001"?  ──► claim_prescription_request()  ← row lock, one winner
-        │
-        └── photo?
-              ├── mediaService    download from Twilio (Basic auth → CDN redirect)
-              ├── aiService       Gemini 2.5 Flash, structured JSON output
-              ├── create_prescription_request()            status = pending
-              ├── find_nearby_pharmacies(lat, lon, 5000)   GIST index, LIMIT 5
-              ├── prescription_broadcasts                  ledger written BEFORE sending
-              └── Twilio fan-out to all 5 pharmacies
-```
+There's also a REST API, built for an admin dashboard. Every `/api/*` route needs an `x-api-key` header, and this is enforced in production because the responses include patient phone numbers.
 
-Module layout follows the PRD:
-
-| Path | Role |
-|---|---|
-| `config/supabase.js` | Supabase client (service role) + connection verification |
-| `config/twilio.js` | Twilio SDK + credential check |
-| `config/env.js` | Validated configuration; the process will not boot without it |
-| `services/aiService.js` | Gemini 2.5 Flash vision wrapper |
-| `services/geoService.js` | PostGIS query helpers |
-| `services/mediaService.js` | Twilio media download + type/size guards |
-| `services/messagingService.js` | Outbound WhatsApp + all message templates |
-| `services/prescriptionService.js` | The pipeline: ingest → verify → match → broadcast → claim |
-| `services/sessionService.js` | Conversational state (location pins, parked photos) |
-| `controllers/whatsappController.js` | Webhook router and state machine |
-| `db/schema.sql` | Tables, PostGIS functions, RLS, grants |
-| `db/seed.sql` | 10 Lagos pharmacies with real coordinates |
-
----
-
-## API
-
-All `/api/*` routes require `x-api-key: $API_KEY` (or `Authorization: Bearer`). Optional in development; **mandatory in production** — these endpoints expose patient phone numbers and prescription contents.
-
-### Pharmacies
-
-| Method | Path | Notes |
+| Method | Endpoint | What it does |
 |---|---|---|
-| `GET` | `/api/pharmacies` | `?active=true&search=&limit=&offset=` |
-| `GET` | `/api/pharmacies/nearby` | `?lat=&lng=&radius=&limit=` — live PostGIS query |
-| `GET` | `/api/pharmacies/:id` | |
-| `POST` | `/api/pharmacies` | Upserts on `phone_number` |
-| `POST` | `/api/pharmacies/bulk` | `{ "pharmacies": [...] }` |
-| `PATCH` | `/api/pharmacies/:id` | `latitude`/`longitude` must be sent together |
-| `DELETE` | `/api/pharmacies/:id` | Deactivates; `?hard=true` deletes (refused if it has fulfilment history) |
+| `GET` | `/api/pharmacies/nearby?lat=&lng=&radius=` | Live PostGIS search |
+| `GET / POST / PATCH / DELETE` | `/api/pharmacies[/:id]` | Manage pharmacies (soft delete by default) |
+| `POST` | `/api/pharmacies/bulk` | Import many at once |
+| `GET` | `/api/prescriptions[/:idOrCode]` | Look up by UUID or short code |
+| `POST` | `/api/prescriptions` | Run the full pipeline, using the same code path as WhatsApp |
+| `POST` | `/api/prescriptions/:code/claim` | Claim (returns `409` if already taken) |
+| `POST` | `/api/prescriptions/:code/rebroadcast` | Resend without calling the AI again |
+| `GET` | `/api/prescriptions/:code/broadcasts` | Delivery status for each pharmacy |
+| `GET` | `/api/stats`, `/api/activity` | Dashboard data |
+| `GET` | `/health`, `/health/deep` | `/deep` checks all four dependencies |
 
-### Prescriptions
-
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/api/prescriptions` | `?status=&patient_phone=&limit=&offset=` |
-| `GET` | `/api/prescriptions/:idOrCode` | Accepts a UUID **or** a short code (`RX0001`) |
-| `GET` | `/api/prescriptions/:idOrCode/broadcasts` | Per-pharmacy fan-out with delivery status |
-| `POST` | `/api/prescriptions` | Runs the full pipeline — same code path as the webhook |
-| `POST` | `/api/prescriptions/:idOrCode/claim` | `409` if already claimed |
-| `POST` | `/api/prescriptions/:idOrCode/rebroadcast` | Re-sends a pending request; reuses the stored AI extraction |
-| `POST` | `/api/prescriptions/expire-stale` | Ages out unclaimed requests |
-
-### Dashboard & health
-
-`GET /api/stats` · `GET /api/activity` · `GET /health` · `GET /health/deep` (round-trips all four dependencies, `503` if any is down)
-
-### Examples
+<details>
+<summary><b>Example requests</b></summary>
 
 ```bash
 K='-H x-api-key:your-key'
 
-# Nearest pharmacies to Yaba
+# Pharmacies near Yaba
 curl $K "localhost:3000/api/pharmacies/nearby?lat=6.5095&lng=3.3711&radius=5000"
 
-# Run a prescription through the real pipeline
+# Send a prescription through the real pipeline
 curl -X POST $K -H 'content-type: application/json' localhost:3000/api/prescriptions \
   -d '{"patient_phone":"+2348012345678","media_url":"https://.../rx.jpg",
        "latitude":6.5095,"longitude":3.3711}'
@@ -133,82 +219,51 @@ curl -X POST $K -H 'content-type: application/json' \
   localhost:3000/api/prescriptions/RX0001/claim \
   -d '{"pharmacy_phone":"+2348000000001"}'
 ```
+</details>
 
 ---
 
-## WhatsApp commands
+## How I tested it
 
-**Patients** — send a location pin, then a photo of the prescription (either order works; a photo sent first is parked and processed automatically when the pin arrives).
+I ran the schema and API against a real PostgreSQL 16 + PostGIS 3.4 database and a real PostgREST instance, not mocks.
 
-**Pharmacies** — reply `YES-<REF>` to claim a broadcast order.
+- ✅ The schema applies cleanly and can be re-run safely
+- ✅ Geo queries use the GIST index (`Index Scan using pharmacies_geo_index`), not a full table scan
+- ✅ 5 simultaneous claims on one order → exactly 1 winner
+- ✅ 44 HTTP route checks covering auth, validation, success and error paths
+- ✅ PDFs, videos, oversized files and empty uploads are all rejected with clear messages
 
-**Anyone** — `STATUS <REF>` for a request's state, `HELP` for instructions.
-
----
-
-## Design notes
-
-Choices worth knowing about, and why.
-
-**Short reference codes.** Pharmacies retype the reference on a phone keypad, so a UUID is unusable and a truncated UUID risks collisions. References come from a sequence, Crockford-base32 encoded (no `I`/`L`/`O`/`U`, nothing that reads as `1` or `0`): `RX0001`, `RX0002`, … Uniqueness is guaranteed by the sequence, not by luck — verified collision-free across 2,000+ rows.
-
-**The claim is decided in Postgres, not in Node.** `claim_prescription_request()` takes a `SELECT … FOR UPDATE` row lock. Two pharmacies replying in the same millisecond cannot both win: the loser's transaction blocks, re-reads `status = 'claimed'`, and is told who won. Verified with 5 simultaneous connections claiming one reference — exactly one `claimed`, four `already_claimed`.
-
-**The broadcast ledger is written before the first message is sent.** A fast pharmacy can reply while we are still messaging the other four, and the claim check reads that ledger to authorise. Writing it afterwards would let a legitimate claim be rejected.
-
-**Geography goes through RPCs.** `GEOGRAPHY` columns can't be written over the PostgREST JSON interface, so every location write calls a Postgres function, and reads come from views that project `ST_Y`/`ST_X` as plain floats. The views use `security_invoker = true` so RLS is evaluated as the caller rather than the view owner.
-
-**The webhook acknowledges immediately.** Twilio abandons a webhook after 15 seconds; a media download plus a Gemini call plus five sends routinely exceeds that. The webhook returns empty TwiML and continues in the background, replying over the REST API. Set `WEBHOOK_ASYNC=false` to process inline when testing with curl.
-
-**Twilio retries are idempotent.** `MessageSid` is unique in `whatsapp_messages`; inserting it first means a retry can't re-run AI vision or re-broadcast the same prescription.
-
-**Failures are recorded, not swallowed.** An unreadable photo is stored with `status = 'failed'` and the AI's reason, so rejections are auditable rather than invisible. `sendWhatsapp` never throws — one failed send out of five must not abort the other four — but every outcome is written to the ledger with its Twilio SID or error.
-
-**National phone formats are rejected, not guessed.** `0803 111 2233` has no country code; inferring one would silently create a pharmacy Twilio can never deliver to. The API returns `400` and asks for international format.
-
-**Pharmacies deactivate rather than delete.** A pharmacy is referenced by `prescription_requests.claimed_by_pharmacy_id`; hard deletion is refused once it has fulfilment history.
-
-### Deviations from the PRD
-
-Three, all additive:
-
-1. **`find_nearby_pharmacies` qualifies its columns** (`p.id`, `p.name`, …). The names in `RETURNS TABLE` are in scope inside the function body, so the PRD's unqualified `SELECT id, name …` fails with `column reference "id" is ambiguous`. Signature and behaviour are otherwise exactly as specified. An optional 4th parameter `max_results` defaults to 5, so 3-argument calls still work.
-
-2. **Extra tables:** `prescription_broadcasts` (makes claims verifiable and delivery traceable), `patient_sessions` (the pin/photo ordering problem), `whatsapp_messages` (idempotency + audit). The PRD's two tables are unchanged apart from additive columns (`short_code`, `claimed_at`, `failure_reason`, `ai_raw_response`, `broadcast_count`).
-
-3. **`db/seed.sql` has 10 pharmacies, not 5.** `find_nearby_pharmacies` has `LIMIT 5` — with only 5 rows you can never observe that it returns the *nearest* five rather than simply all of them. Four sit within 5 km of the Yaba demo pin; the rest span Ikeja, Ikoyi, Victoria Island and Lekki so radius behaviour is visible. Numbers are in the unassigned `+2348000000xxx` block so a stray test broadcast cannot reach a real person.
+`npm run db:verify` repeats the database checks against your own Supabase project. Once your keys are set, `GET /health/deep` confirms Supabase, Twilio and Gemini are all reachable.
 
 ---
 
-## Verification
+## Configuration
 
-The schema and API were exercised against real PostgreSQL 16 + PostGIS 3.4 and a real PostgREST instance (not mocks) during development:
+Required: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `GEMINI_API_KEY`. See [`.env.example`](.env.example) for everything else.
 
-- `db/schema.sql` applies cleanly and is idempotent across repeated runs.
-- The geo query uses the GIST index (`Index Scan using pharmacies_geo_index`), not a sequential scan.
-- 5 concurrent claims on one reference → exactly 1 winner, 4 `already_claimed`.
-- 44 HTTP route assertions covering auth, validation, success, and error paths.
-- Media guards: PDFs, videos, oversized and empty payloads all rejected with actionable messages.
-
-`npm run db:verify` reproduces the database half of this against your own Supabase project.
-
-Not covered without live credentials: an end-to-end Gemini vision call on a real prescription photo, and live Twilio delivery. The Gemini request path is confirmed well-formed — with a placeholder key the API returns `API_KEY_INVALID`, meaning the request reached Google and was parsed. Run `GET /health/deep` once your keys are in place to confirm all four dependencies.
-
----
-
-## Environment
-
-See `.env.example`. Required: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `GEMINI_API_KEY`.
-
-Notable optional settings:
-
-| Variable | Default | Purpose |
+| Variable | Default | What it controls |
 |---|---|---|
-| `SEARCH_RADIUS_METERS` | `5000` | Initial search radius; widens to 2× then 4× if nothing is found |
-| `MAX_PHARMACIES_PER_BROADCAST` | `5` | Fan-out size |
-| `CLAIM_REQUIRES_BROADCAST` | `true` | Only pharmacies the request was sent to may claim it |
-| `WEBHOOK_ASYNC` | `true` | Ack Twilio immediately, process in background |
-| `VALIDATE_TWILIO_SIGNATURE` | `false` | Turn on for anything deployed; needs `PUBLIC_BASE_URL` |
-| `API_KEY` | — | Guards `/api/*`; required in production |
+| `SEARCH_RADIUS_METERS` | `5000` | Starting search radius (widens to 2× then 4×) |
+| `MAX_PHARMACIES_PER_BROADCAST` | `5` | How many pharmacies get each request |
+| `CLAIM_REQUIRES_BROADCAST` | `true` | Only pharmacies that were asked can claim |
+| `WEBHOOK_ASYNC` | `true` | Reply to Twilio immediately and process in the background |
+| `VALIDATE_TWILIO_SIGNATURE` | `false` | Turn on for any deployed environment |
+| `API_KEY` | none | Protects `/api/*`; required in production |
 
-> `SUPABASE_SERVICE_ROLE_KEY` bypasses Row Level Security. Keep it server-side — never ship it to a browser or mobile client.
+> 🔒 `SUPABASE_SERVICE_ROLE_KEY` bypasses row-level security. Keep it on the server only.
+
+---
+
+## What's next
+
+- 💳 Payment and delivery confirmation inside the chat
+- 📊 A web dashboard for pharmacies to manage stock and see past orders
+- 🌍 More cities beyond Lagos
+- 🔔 Remind the patient when a request expires unclaimed, and offer a wider search
+
+---
+
+<p align="center">
+  Built to make "Do you have this drug?" a one-message question.<br/>
+  If you have feedback or ideas, open an issue. I'd love to hear them.
+</p>
