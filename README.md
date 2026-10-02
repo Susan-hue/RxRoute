@@ -13,7 +13,7 @@
 
 ## Why I built this
 
-Here's what usually happens in Lagos when a doctor hands you a prescription. You go to the closest pharmacy and they don't have it. You try the next one, then the next. Sometimes you're doing this while you feel awful, or while someone you love is waiting at home.
+Here's what usually happens in Nigeria when a doctor hands you a prescription. You go to the closest pharmacy and they don't have it. You try the next one, then the next. Sometimes you're doing this while you feel awful, or while someone you love is waiting at home.
 
 Pharmacies are close by, and most of them are on WhatsApp. What's missing is a quick way to ask all of them at once.
 
@@ -258,7 +258,7 @@ Required: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TWILIO_ACCOUNT_SID`, `TW
 
 - Payment and delivery confirmation inside the chat
 - A web dashboard for pharmacies to manage stock and see past orders
-- More cities beyond Lagos
+- Bring on pharmacies in all 36 states and the FCT, so coverage reaches every part of Nigeria
 - Remind the patient when a request expires unclaimed, and offer a wider search
 
 ---
