@@ -68,15 +68,20 @@ export async function findNearbyPharmaciesDetailed(
  * when one sits 6 km away. The escalation is reported back so the broadcast can
  * tell the patient the pharmacy is further out than usual.
  */
-export async function findNearbyPharmaciesWithFallback(lat, lon, { radiusMeters, limit, maxRadiusMeters } = {}) {
+export async function findNearbyPharmaciesWithFallback(
+  lat,
+  lon,
+  { radiusMeters, limit, maxRadiusMeters, detailed = false } = {},
+) {
   assertCoordinate(lat, lon);
 
   const baseRadius = radiusMeters ?? env.SEARCH_RADIUS_METERS;
   const ceiling = maxRadiusMeters ?? baseRadius * 4;
   const steps = [baseRadius, baseRadius * 2, ceiling].filter((r, i, arr) => r <= ceiling && arr.indexOf(r) === i);
+  const lookup = detailed ? findNearbyPharmaciesDetailed : findNearbyPharmacies;
 
   for (const radius of steps) {
-    const pharmacies = await findNearbyPharmacies(lat, lon, radius, limit ?? env.MAX_PHARMACIES_PER_BROADCAST);
+    const pharmacies = await lookup(lat, lon, radius, limit ?? env.MAX_PHARMACIES_PER_BROADCAST);
     if (pharmacies.length > 0) {
       return { pharmacies, radiusMeters: radius, widened: radius > baseRadius };
     }

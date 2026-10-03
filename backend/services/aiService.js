@@ -4,7 +4,7 @@ import { logger, errorMeta } from '../utils/logger.js';
 import { badGateway } from '../utils/httpError.js';
 
 /**
- * Gemini 2.5 Flash vision wrapper.
+ * Gemini Flash vision wrapper.
  *
  * Responsibility: given an image of a (possibly) handwritten prescription,
  * decide whether it is a genuine medical document and extract the medications.

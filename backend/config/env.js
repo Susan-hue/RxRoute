@@ -36,7 +36,7 @@ const schema = z.object({
 
   // --- Gemini -------------------------------------------------------------
   GEMINI_API_KEY: z.string().min(10, 'GEMINI_API_KEY looks truncated'),
-  GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
+  GEMINI_MODEL: z.string().default('gemini-3.8-flash'),
 
   // --- Routing behaviour --------------------------------------------------
   SEARCH_RADIUS_METERS: z.coerce.number().positive().default(5000),
@@ -54,6 +54,16 @@ const schema = z.object({
   WEBHOOK_ASYNC: booleanish('true'),
   // When set, /api/* requires `x-api-key` (or Bearer) matching this value.
   API_KEY: z.string().min(8).optional(),
+
+  // --- Public web app (/api/public/*) -------------------------------------
+  // Comma-separated origins allowed to call the public API from a browser,
+  // e.g. https://rxroute.vercel.app. Not needed in development: Vite proxies.
+  CORS_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) => (v ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)),
+  // Each upload costs a Gemini call and up to five outbound messages.
+  PUBLIC_UPLOADS_PER_HOUR: z.coerce.number().int().positive().default(20),
 
   // --- Tooling only (scripts/applySql.js, scripts/verifyDb.js) ------------
   DATABASE_URL: z.string().optional(),

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import webhookRoutes from './webhookRoutes.js';
 import pharmacyRoutes from './pharmacyRoutes.js';
 import prescriptionRoutes from './prescriptionRoutes.js';
+import publicRoutes from './publicRoutes.js';
 import { health, deepHealth, stats, activity } from '../controllers/statsController.js';
 import { apiKeyAuth } from '../middleware/apiKeyAuth.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
@@ -14,6 +15,9 @@ router.get('/health/deep', asyncHandler(deepHealth));
 
 // --- Twilio webhooks (authenticated by X-Twilio-Signature, not the API key) ---
 router.use('/webhook', webhookRoutes);
+
+// --- Public web app API (rate limited; mounted before the API key guard) ----
+router.use('/api/public', publicRoutes);
 
 // --- REST API (shared-secret protected) -------------------------------------
 router.use('/api', apiKeyAuth);
@@ -49,6 +53,7 @@ router.get('/', (req, res) => {
         'POST /api/prescriptions/expire-stale',
       ],
       dashboard: ['GET /api/stats', 'GET /api/activity'],
+      public: ['POST /api/public/prescriptions (multipart)', 'GET /api/public/prescriptions/:id'],
     },
   });
 });

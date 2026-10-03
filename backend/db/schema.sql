@@ -1,27 +1,8 @@
--- ============================================================================
--- RxRoute — Database schema, PostGIS setup and RPC surface
--- Target: Supabase (PostgreSQL 15+)
---
--- Safe to run repeatedly: every statement is idempotent.
--- Run in the Supabase SQL editor, or `npm run db:push` (needs DATABASE_URL).
--- ============================================================================
 
--- ---------------------------------------------------------------------------
--- 0. Extensions
--- ---------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_uuid()
 
 
--- ---------------------------------------------------------------------------
--- 1. Human-friendly reference codes
---
--- Pharmacies claim an order by replying "YES-<SHORT_ID>" over WhatsApp, so the
--- reference has to be short enough to retype on a phone. A raw UUID is not,
--- and truncating one risks collisions, so references are drawn from a sequence
--- and Crockford-base32 encoded (no I/L/O/U — nothing that reads as 1 or 0).
--- Result: RX0001, RX0002 ... guaranteed unique, 6 characters.
--- ---------------------------------------------------------------------------
 CREATE SEQUENCE IF NOT EXISTS prescription_ref_seq START WITH 1 INCREMENT BY 1;
 
 CREATE OR REPLACE FUNCTION rxroute_encode_ref(n BIGINT)

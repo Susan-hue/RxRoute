@@ -1,28 +1,7 @@
--- ============================================================================
--- RxRoute — Development seed data
---
--- Run AFTER db/schema.sql:  npm run db:seed
--- Idempotent: keyed on phone_number via upsert_pharmacy(), so re-running
--- updates the existing rows rather than duplicating them.
---
--- The PRD asks for 5 pharmacies. This seeds 10, because find_nearby_pharmacies
--- has `LIMIT 5` — with only 5 rows in the table you can never actually observe
--- that the query returns the *nearest* five rather than simply all of them.
--- Four of these sit inside a 5 km radius of the Yaba demo pin, the rest span
--- Ikeja, Ikoyi, Victoria Island and Lekki so radius behaviour is visible too.
---
--- Phone numbers are deliberately in the unassigned +2348000000xxx block so a
--- stray broadcast during testing cannot reach a real person. Replace the first
--- one or two with your own WhatsApp number (joined to the Twilio Sandbox) to
--- receive live broadcasts.
--- ============================================================================
 
--- --------------------------------------------------------------------------
--- Lagos Mainland cluster — within ~5 km of the Yaba demo pin (6.5095, 3.3711)
--- --------------------------------------------------------------------------
 SELECT upsert_pharmacy(
     'HealthPlus Yaba',
-    'whatsapp:+2348000000001',
+    'whatsapp:+2349138758242',
     6.5131, 3.3699,
     '142 Herbert Macaulay Way, Yaba, Lagos'
 );
@@ -97,10 +76,6 @@ SELECT upsert_pharmacy(
 );
 
 
--- ============================================================================
--- Verification — what a patient standing in Yaba would reach within 5 km.
--- Expect 5 rows ordered by distance, nearest first.
--- ============================================================================
 SELECT
     name,
     phone_number,

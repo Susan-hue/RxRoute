@@ -110,21 +110,27 @@ async function broadcastToPharmacies({ request, pharmacies, drugs }) {
  *
  * @param {object}  args
  * @param {string}  args.patientPhone  whatsapp:+234…
- * @param {string}  args.mediaUrl      Twilio media URL.
+ * @param {string}  args.mediaUrl      Twilio media URL, or an `upload:` reference when `media` is supplied.
  * @param {string}  [args.contentType]
+ * @param {{buffer: Buffer, mimeType: string}} [args.media]  An image already in memory (web upload); skips the download.
  * @param {number}  args.lat
  * @param {number}  args.lon
  * @param {boolean} [args.notifyPatient=true]
- * @returns {Promise<{outcome: string, request: object|null, analysis: object, pharmacies: Array, delivered: number}>}
+ * @param {boolean} [args.detailedPharmacies=false]  Attach address and coordinates to each matched pharmacy.
+ * @param {(stage: 'analyzing'|'locating'|'broadcasting') => void} [args.onStage]  Progress hook for the web app.
+ * @returns {Promise<{outcome: string, request: object|null, analysis: object, pharmacies: Array, delivered: number, radiusMeters: number|null, widened: boolean}>}
  *          outcome ∈ 'broadcast' | 'invalid_prescription' | 'no_pharmacies'
  */
 export async function processPrescription({
   patientPhone,
   mediaUrl,
   contentType = null,
+  media = null,
   lat,
   lon,
   notifyPatient = true,
+  detailedPharmacies = false,
+  onStage = () => {},
 }) {
   if (!patientPhone) throw badRequest('patientPhone is required');
   if (!mediaUrl) throw badRequest('mediaUrl is required');
@@ -135,11 +141,12 @@ export async function processPrescription({
   const startedAt = Date.now();
   logger.info('prescription.processing', { patientPhone, mediaUrl });
 
-  // 1. Fetch the image from Twilio.
-  const media = await downloadTwilioMedia(mediaUrl, contentType);
+  // 1. Fetch the image from Twilio, unless the web app already uploaded it.
+  const image = media ?? (await downloadTwilioMedia(mediaUrl, contentType));
 
   // 2. AI vision verdict.
-  const analysis = await analysePrescriptionImage(media.buffer, media.mimeType);
+  onStage('analyzing');
+  const analysis = await analysePrescriptionImage(image.buffer, image.mimeType);
 
   // 3a. Rejected — persist the attempt so the failure is auditable, not silent.
   if (!analysis.valid) {
@@ -152,7 +159,7 @@ export async function processPrescription({
       p_status: 'failed',
       p_failure_reason: analysis.reason,
       p_ai_raw: analysis.raw,
-      p_content_type: media.mimeType,
+      p_content_type: image.mimeType,
     });
 
     logger.info('prescription.rejected', { shortCode: failed.short_code, reason: analysis.reason });
@@ -161,7 +168,15 @@ export async function processPrescription({
       await sendWhatsapp(patientPhone, buildInvalidPrescriptionMessage(analysis.reason));
     }
 
-    return { outcome: 'invalid_prescription', request: failed, analysis, pharmacies: [], delivered: 0 };
+    return {
+      outcome: 'invalid_prescription',
+      request: failed,
+      analysis,
+      pharmacies: [],
+      delivered: 0,
+      radiusMeters: null,
+      widened: false,
+    };
   }
 
   // 3b. Accepted — create the pending request.
@@ -174,11 +189,14 @@ export async function processPrescription({
     p_status: 'pending',
     p_failure_reason: null,
     p_ai_raw: analysis.raw,
-    p_content_type: media.mimeType,
+    p_content_type: image.mimeType,
   });
 
   // 4. PostGIS geo-match.
-  const { pharmacies, radiusMeters, widened } = await findNearbyPharmaciesWithFallback(lat, lon);
+  onStage('locating');
+  const { pharmacies, radiusMeters, widened } = await findNearbyPharmaciesWithFallback(lat, lon, {
+    detailed: detailedPharmacies,
+  });
 
   if (pharmacies.length === 0) {
     const { error } = await supabase
@@ -197,10 +215,11 @@ export async function processPrescription({
       await sendWhatsapp(patientPhone, buildNoPharmaciesMessage(radiusMeters));
     }
 
-    return { outcome: 'no_pharmacies', request, analysis, pharmacies: [], delivered: 0 };
+    return { outcome: 'no_pharmacies', request, analysis, pharmacies: [], delivered: 0, radiusMeters, widened };
   }
 
   // 5. Broadcast.
+  onStage('broadcasting');
   const { deliveredCount } = await broadcastToPharmacies({ request, pharmacies, drugs: analysis.drugs });
 
   if (notifyPatient) {
@@ -229,6 +248,8 @@ export async function processPrescription({
     analysis,
     pharmacies,
     delivered: deliveredCount,
+    radiusMeters,
+    widened,
   };
 }
 

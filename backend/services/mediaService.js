@@ -90,13 +90,35 @@ export async function downloadTwilioMedia(mediaUrl, declaredType) {
   const hintType = (declaredType ?? '').split(';')[0].trim().toLowerCase();
   const mimeType = ACCEPTED_IMAGE_TYPES.has(headerType) ? headerType : hintType || headerType || 'image/jpeg';
 
+  logger.info('media.downloaded', { bytes: buffer.length, mimeType, durationMs: Date.now() - startedAt });
+
+  return toGeminiImage(buffer, mimeType);
+}
+
+/**
+ * Applies the same guards to a photo uploaded straight from the web app, which
+ * arrives as a buffer rather than a URL.
+ *
+ * @returns {{buffer: Buffer, mimeType: string, bytes: number}}
+ */
+export function prepareUploadedImage(buffer, declaredType) {
+  if (!buffer || buffer.length === 0) {
+    throw badRequest('The uploaded photo is empty.');
+  }
+  if (buffer.length > env.MAX_MEDIA_BYTES) {
+    throw badRequest(`Image is ${Math.round(buffer.length / 1024)} KB, over the ${Math.round(env.MAX_MEDIA_BYTES / 1024)} KB limit.`);
+  }
+
+  const mimeType = (declaredType ?? '').split(';')[0].trim().toLowerCase();
+  return toGeminiImage(buffer, mimeType);
+}
+
+function toGeminiImage(buffer, mimeType) {
   if (!ACCEPTED_IMAGE_TYPES.has(mimeType)) {
     throw badRequest(
       `Unsupported attachment type "${mimeType}". Send the prescription as a photo (JPEG, PNG, WebP or HEIC).`,
     );
   }
-
-  logger.info('media.downloaded', { bytes: buffer.length, mimeType, durationMs: Date.now() - startedAt });
 
   // Gemini has no HEIC decoder; WhatsApp transcodes to JPEG in practice, so
   // label it as such rather than rejecting a photo that is almost certainly fine.
